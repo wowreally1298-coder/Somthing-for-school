@@ -1,0 +1,421 @@
+import React, { useEffect, useRef, useState } from "react";
+
+// GridQuest.jsx
+// Single-file React game component. Uses Tailwind for styling.
+// Default export a React component ready to drop into a React + Tailwind project.
+
+export default function GridQuest() {
+  // --- Game configuration ---
+  const MAPS = [
+    { id: "forest", name: "Whispering Forest", tile: "🌲" },
+    { id: "desert", name: "Searing Desert", tile: "🏜️" },
+    { id: "space", name: "Void of Stars", tile: "🌌" },
+  ];
+  const LEVELS_PER_MAP = 3; // user asked: 3 levels in each map
+  const GRID_SIZE = 12; // 12x12 grid
+
+  // Player classes (variety of players)
+  const PLAYER_CLASSES = [
+    { id: "scout", name: "Scout", speed: 220, health: 80, ability: "Speed Burst" },
+    { id: "tank", name: "Tank", speed: 120, health: 140, ability: "Shield" },
+    { id: "mage", name: "Mage", speed: 160, health: 100, ability: "Fire Spark" },
+  ];
+
+  // --- State ---
+  const [stage, setStage] = useState("lobby");
+  // stages: lobby -> choosing-class -> playing -> between -> finished
+
+  const [selectedClass, setSelectedClass] = useState(PLAYER_CLASSES[0]);
+  const [mapIndex, setMapIndex] = useState(0);
+  const [levelIndex, setLevelIndex] = useState(0);
+
+  // A simple representation for entities: player, enemies, powerups
+  const [player, setPlayer] = useState(null);
+  const [enemies, setEnemies] = useState([]);
+  const [powerups, setPowerups] = useState([]);
+
+  // Score and stats
+  const [score, setScore] = useState(0);
+  const [message, setMessage] = useState("");
+
+  // For between-level choice where player must write it to move on
+  const [choiceOptions, setChoiceOptions] = useState([]);
+  const [typedConfirm, setTypedConfirm] = useState("");
+  const [selectedChoice, setSelectedChoice] = useState(null);
+
+  // Refs for animation loop
+  const lastTimeRef = useRef(null);
+  const runningRef = useRef(false);
+
+  // Utility: random integer
+  function randInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  // --- Game setup per level ---
+  function spawnLevel(mapIdx, lvlIdx, playerClass) {
+    const difficulty = lvlIdx + 1 + mapIdx; // increases with level and map
+    const enemyCount = 2 + difficulty * 2; // more enemies as difficulty rises
+    const enemiesNew = [];
+
+    for (let i = 0; i < enemyCount; i++) {
+      enemiesNew.push({
+        id: `e_${Date.now()}_${i}`,
+        x: randInt(0, GRID_SIZE - 1),
+        y: randInt(0, GRID_SIZE - 1),
+        hp: 10 + difficulty * 6,
+        speed: 1 + difficulty * 0.2,
+      });
+    }
+
+    // spawn 1-2 powerups
+    const powerupsNew = [];
+    const puCount = 1 + Math.floor(difficulty / 2);
+    const PU_TYPES = [
+      { id: "speed", name: "Speed Boost", desc: "Move faster for a short time" },
+      { id: "shield", name: "Shield", desc: "Negates next hit" },
+      { id: "double", name: "Double Gems", desc: "Double points collected" },
+    ];
+    for (let i = 0; i < puCount; i++) {
+      const p = PU_TYPES[randInt(0, PU_TYPES.length - 1)];
+      powerupsNew.push({ id: `pu_${Date.now()}_${i}`, x: randInt(0, GRID_SIZE - 1), y: randInt(0, GRID_SIZE - 1), type: p.id, name: p.name });
+    }
+
+    // player spawn roughly center
+    const px = Math.floor(GRID_SIZE / 2);
+    const py = Math.floor(GRID_SIZE / 2);
+
+    const playerNew = {
+      id: `p_${Date.now()}`,
+      classId: playerClass.id,
+      name: playerClass.name,
+      x: px,
+      y: py,
+      hp: playerClass.health,
+      baseSpeed: playerClass.speed,
+      speedBuffUntil: 0,
+      shielded: false,
+    };
+
+    setEnemies(enemiesNew);
+    setPowerups(powerupsNew);
+    setPlayer(playerNew);
+    setMessage(`Map: ${MAPS[mapIdx].name} — Level ${lvlIdx + 1}`);
+  }
+
+  // Start new game
+  function startGame() {
+    setMapIndex(0);
+    setLevelIndex(0);
+    spawnLevel(0, 0, selectedClass);
+    setStage("playing");
+    setScore(0);
+  }
+
+  // Game loop
+  useEffect(() => {
+    function step(time) {
+      if (!lastTimeRef.current) lastTimeRef.current = time;
+      const dt = Math.min(50, time - lastTimeRef.current); // ms since last frame (clamped)
+      lastTimeRef.current = time;
+
+      // update enemies movement
+      setEnemies(prev => prev.map(e => {
+        // simple random walk biased towards player
+        if (!player) return e;
+        const dx = player.x - e.x;
+        const dy = player.y - e.y;
+        const moveX = Math.sign(dx) * (Math.random() < 0.6 ? 1 : 0);
+        const moveY = Math.sign(dy) * (Math.random() < 0.6 ? 1 : 0);
+        const nx = Math.max(0, Math.min(GRID_SIZE - 1, e.x + moveX));
+        const ny = Math.max(0, Math.min(GRID_SIZE - 1, e.y + moveY));
+        return { ...e, x: nx, y: ny };
+      }));
+
+      // handle collisions player <-> enemies and powerups
+      if (player) {
+        // enemies collisions
+        setEnemies(prev => {
+          const remaining = [];
+          let playerHit = false;
+          let newScore = 0;
+          prev.forEach(e => {
+            if (e.x === player.x && e.y === player.y) {
+              // collision: damage enemy and player
+              const enemyLeft = { ...e, hp: e.hp - 20 };
+              if (enemyLeft.hp > 0) remaining.push(enemyLeft);
+              // player takes damage unless shielded
+              if (!player.shielded) {
+                setPlayer(p => ({ ...p, hp: Math.max(0, p.hp - 20) }));
+              } else {
+                // consume shield
+                setPlayer(p => ({ ...p, shielded: false }));
+              }
+              playerHit = true;
+              newScore += 10;
+            } else {
+              remaining.push(e);
+            }
+          });
+          if (newScore) setScore(s => s + newScore);
+          return remaining;
+        });
+
+        // powerups collisions
+        setPowerups(prev => {
+          const remaining = [];
+          prev.forEach(pu => {
+            if (pu.x === player.x && pu.y === player.y) {
+              // apply powerup to player
+              if (pu.type === "speed") {
+                setPlayer(p => ({ ...p, speedBuffUntil: Date.now() + 5000 }));
+                setMessage("Picked up Speed Boost!");
+              } else if (pu.type === "shield") {
+                setPlayer(p => ({ ...p, shielded: true }));
+                setMessage("Shield activated!");
+              } else if (pu.type === "double") {
+                // add a simple double score state by storing a temporary multiplier on player
+                setPlayer(p => ({ ...p, doubleUntil: Date.now() + 8000 }));
+                setMessage("Double points for a short time!");
+              }
+            } else remaining.push(pu);
+          });
+          return remaining;
+        });
+      }
+
+      // check player death or level clear
+      if (player && player.hp <= 0) {
+        setStage("finished");
+        setMessage("You were defeated. Refresh to try again.");
+        runningRef.current = false;
+        return;
+      }
+
+      // if all enemies defeated -> between-level stage (or next map finished)
+      if (enemies.length === 0 && stage === "playing") {
+        // prepare between-level choices
+        prepareBetweenLevel();
+        setStage("between");
+      }
+
+      requestAnimationFrame(step);
+    }
+
+    if (!runningRef.current) {
+      runningRef.current = true;
+      requestAnimationFrame(step);
+    }
+
+    return () => { runningRef.current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player, enemies, powerups, stage]);
+
+  // move player with arrow keys or WASD
+  useEffect(() => {
+    function onKey(e) {
+      if (stage !== "playing") return;
+      const code = e.key;
+      const move = { x: 0, y: 0 };
+      if (code === "ArrowUp" || code === "w") move.y = -1;
+      else if (code === "ArrowDown" || code === "s") move.y = 1;
+      else if (code === "ArrowLeft" || code === "a") move.x = -1;
+      else if (code === "ArrowRight" || code === "d") move.x = 1;
+      else return;
+
+      setPlayer(p => {
+        if (!p) return p;
+        const speedBuff = p.speedBuffUntil > Date.now() ? 1 : 0;
+        const stepSize = 1 + speedBuff; // simple buff = extra tile
+        const nx = Math.max(0, Math.min(GRID_SIZE - 1, p.x + move.x * stepSize));
+        const ny = Math.max(0, Math.min(GRID_SIZE - 1, p.y + move.y * stepSize));
+        return { ...p, x: nx, y: ny };
+      });
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [stage]);
+
+  // between-level preparation
+  function prepareBetweenLevel() {
+    // choose 2 options to present
+    const OPTIONS = [
+      { key: "ExtraLife", desc: "Gain +30 HP" },
+      { key: "MapHint", desc: "Reveal enemy spawn hints next level" },
+      { key: "PowerShard", desc: "Get a guaranteed random power-up" },
+      { key: "ScoreBoost", desc: "+50 score now" },
+    ];
+    const shuffled = OPTIONS.sort(() => 0.5 - Math.random());
+    const chosen = shuffled.slice(0, 2);
+    setChoiceOptions(chosen);
+    setTypedConfirm("");
+    setSelectedChoice(null);
+    setMessage("Between levels: choose a reward and then type its key to confirm and move on.");
+  }
+
+  // confirm typed choice
+  function confirmChoice() {
+    if (!selectedChoice) return setMessage("Select an option first.");
+    if (typedConfirm.trim() === selectedChoice.key) {
+      // apply reward
+      if (selectedChoice.key === "ExtraLife") {
+        setPlayer(p => ({ ...p, hp: (p?.hp || 0) + 30 }));
+      } else if (selectedChoice.key === "MapHint") {
+        setMessage("Map hints active for next level!");
+      } else if (selectedChoice.key === "PowerShard") {
+        // spawn a guaranteed powerup at player's tile
+        setPowerups(prev => [...prev, { id: `pu_guarantee_${Date.now()}`, x: player.x, y: player.y, type: "speed", name: "Guaranteed Speed" }]);
+      } else if (selectedChoice.key === "ScoreBoost") {
+        setScore(s => s + 50);
+      }
+
+      // proceed to next level or map
+      const nextLevel = levelIndex + 1;
+      if (nextLevel < LEVELS_PER_MAP) {
+        setLevelIndex(nextLevel);
+        spawnLevel(mapIndex, nextLevel, selectedClass);
+        setStage("playing");
+      } else {
+        // advance to next map
+        const nextMap = mapIndex + 1;
+        if (nextMap < MAPS.length) {
+          setMapIndex(nextMap);
+          setLevelIndex(0);
+          spawnLevel(nextMap, 0, selectedClass);
+          setStage("playing");
+        } else {
+          setStage("finished");
+          setMessage("Congratulations — you've completed all maps!");
+        }
+      }
+    } else {
+      setMessage("Typed key didn't match. Type the exact option key (case sensitive) to confirm.");
+    }
+  }
+
+  // UI
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-700 text-white p-6">
+      <div className="max-w-4xl mx-auto bg-slate-800/60 rounded-2xl p-6 shadow-2xl">
+        <header className="flex items-center justify-between mb-4">
+          <h1 className="text-2xl font-bold">GridQuest — Maps & Levels Demo</h1>
+          <div className="text-sm">
+            <div>Map: {MAPS[mapIndex].name}</div>
+            <div>Level: {levelIndex + 1} / {LEVELS_PER_MAP}</div>
+          </div>
+        </header>
+
+        {stage === "lobby" && (
+          <div className="space-y-4">
+            <p>Welcome! Choose your class then press Start.</p>
+            <div className="flex gap-3">
+              {PLAYER_CLASSES.map(pc => (
+                <button key={pc.id} onClick={() => { setSelectedClass(pc); setStage('choosing-class'); }} className={`p-3 rounded-lg border ${selectedClass.id===pc.id? 'border-amber-400':'border-slate-600'}`}>
+                  <div className="font-semibold">{pc.name}</div>
+                  <div className="text-xs">HP: {pc.health} • Speed: {pc.speed}</div>
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setStage('choosing-class')} className="px-4 py-2 rounded bg-amber-500 text-slate-900">Choose Class</button>
+              <button onClick={() => { setSelectedClass(PLAYER_CLASSES[0]); startGame(); }} className="px-4 py-2 rounded bg-sky-500">Quick Start</button>
+            </div>
+            <div className="text-xs text-slate-300">Controls: Arrow keys or WASD to move. Collide with enemies to damage them. Pick up power-ups by moving onto them.</div>
+          </div>
+        )}
+
+        {stage === "choosing-class" && (
+          <div className="space-y-4">
+            <h2 className="text-lg">Class Selected: {selectedClass.name}</h2>
+            <p>Press Start to begin your adventure on the first map.</p>
+            <div className="flex gap-2">
+              <button onClick={startGame} className="px-4 py-2 rounded bg-green-500">Start</button>
+              <button onClick={() => setStage('lobby')} className="px-4 py-2 rounded bg-slate-600">Back</button>
+            </div>
+          </div>
+        )}
+
+        {stage === "playing" && (
+          <div className="grid md:grid-cols-3 gap-4">
+            <div className="md:col-span-2">
+              <div className="bg-slate-900/60 rounded-lg p-3">
+                <div className="grid grid-cols-12 gap-0 leading-none">{/* grid display */}
+                  {Array.from({ length: GRID_SIZE * GRID_SIZE }).map((_, idx) => {
+                    const x = idx % GRID_SIZE;
+                    const y = Math.floor(idx / GRID_SIZE);
+                    const hasPlayer = player && player.x === x && player.y === y;
+                    const hasEnemy = enemies.find(e => e.x === x && e.y === y);
+                    const hasPU = powerups.find(pu => pu.x === x && pu.y === y);
+                    const tileEmoji = MAPS[mapIndex].tile;
+                    return (
+                      <div key={idx} className={`w-8 h-8 flex items-center justify-center text-sm border border-slate-700 ${hasPlayer ? 'bg-amber-500/30' : 'bg-transparent'}`}>
+                        {hasPlayer ? '😃' : hasEnemy ? '👾' : hasPU ? '✨' : tileEmoji}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <aside className="space-y-3">
+              <div className="p-3 rounded bg-slate-900/50">
+                <div className="text-sm">Player: {player?.name}</div>
+                <div className="text-xs">HP: {player?.hp} | Shielded: {player?.shielded ? 'Yes' : 'No'}</div>
+                <div className="text-xs">Score: {score}</div>
+              </div>
+
+              <div className="p-3 rounded bg-slate-900/50">
+                <div className="font-semibold">Power-ups on map</div>
+                <ul className="text-sm">
+                  {powerups.map(pu => (<li key={pu.id}>{pu.name} @ ({pu.x},{pu.y})</li>))}
+                  {powerups.length === 0 && <li className="text-xs text-slate-400">None</li>}
+                </ul>
+              </div>
+
+              <div className="p-3 rounded bg-slate-900/50">
+                <div className="font-semibold">Enemies: {enemies.length}</div>
+                <div className="text-xs">Defeat all to continue</div>
+              </div>
+
+              <div className="p-3 rounded bg-slate-900/50 text-sm">{message}</div>
+            </aside>
+          </div>
+        )}
+
+        {stage === "between" && (
+          <div className="space-y-3">
+            <h2 className="text-lg">Between Levels — Choose a reward</h2>
+            <p className="text-sm">You must <strong>type the option's key exactly</strong> to confirm your choice and proceed (this is the "player must write it to move on" mechanic you requested).</p>
+            <div className="flex gap-3">
+              {choiceOptions.map(opt => (
+                <div key={opt.key} className={`p-3 rounded border ${selectedChoice?.key===opt.key ? 'border-amber-300' : 'border-slate-700'}`} onClick={() => setSelectedChoice(opt)}>
+                  <div className="font-semibold">{opt.key}</div>
+                  <div className="text-xs">{opt.desc}</div>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <input value={typedConfirm} onChange={e => setTypedConfirm(e.target.value)} className="p-2 rounded bg-slate-700 text-white" placeholder="Type the option key here (case-sensitive)" />
+              <button onClick={confirmChoice} className="px-4 py-2 rounded bg-emerald-500">Confirm</button>
+            </div>
+            <div className="text-xs text-slate-300">Hint: type exactly the key shown (e.g. ExtraLife) and press Confirm.</div>
+          </div>
+        )}
+
+        {stage === "finished" && (
+          <div className="space-y-3">
+            <h2 className="text-lg">Game Over / Victory</h2>
+            <p className="text-sm">{message}</p>
+            <div className="flex gap-2">
+              <button onClick={() => { setStage('lobby'); setPlayer(null); setEnemies([]); setPowerups([]); }} className="px-4 py-2 rounded bg-slate-600">Back to Lobby</button>
+              <button onClick={() => { startGame(); }} className="px-4 py-2 rounded bg-amber-500">Play Again</button>
+            </div>
+            <div className="text-sm">Final Score: {score}</div>
+          </div>
+        )}
+
+        <footer className="mt-4 text-xs text-slate-400">Tip: This is a single-file demo. Drop it into a React + Tailwind project and import it in App.jsx. It uses keyboard controls. Enjoy customizing maps, art, and game balance!</footer>
+      </div>
+    </div>
+  );
+}
